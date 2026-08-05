@@ -1,0 +1,984 @@
+Ниже — минимально-инвазивные исправления (код уже в эксплуатации).
+Изменения только в критичных местах, помечены // ✅ FIX.
+Полный текст обоих компонентов.
+
+// ======================================================================================================================
+//                                     1. FlatTableInfinity.jsx (полный текст с фиксами)
+// ======================================================================================================================
+
+
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useReactTable,
+  getCoreRowModel,
+  flexRender,
+  getSortedRowModel
+} from "@tanstack/react-table";
+
+import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import EditIcon from "@mui/icons-material/Edit";
+import DeleteForeverIcon from '@mui/icons-material/DeleteForever';
+import FilterListIcon from "@mui/icons-material/FilterList";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import { Box, CircularProgress, Typography } from '@mui/material';
+
+import FilterDialog from '../../../pages/FilterDialog';
+import { formatDate } from '../../../utils/dateUtils';
+import { CanAccess, hasPermission, useUiPermission } from '../../../context/PermissionsContext';
+
+/**
+ * Универсальная плоская таблица с поддержкой:
+ * - оптимистичного обновления
+ * - фильтров
+ * - CRUD-формы
+ * - прав доступа
+ * - опционального бесконечного скролла
+ */
+const FlatTableInfinity = ({
+  title = "",
+  pageName = "",
+  visibleToolbarButtons = ['add', 'filter', 'refresh', 'Действия'],
+  data,
+  columns,
+  pk,
+  setData,
+  reloadData,
+  FormComponent,
+  initialNewIdent = "",
+  onApplyFilters,
+  loading = false,
+  FilterComponent,
+  filterConfig = {},
+  onRowSelect,
+  record = null,
+  activeRecord = null,
+
+  // ===== Infinite scroll =====
+  infinite = false,
+  hasMore = false,
+  isLoadingMore = false, // только для UI (спиннер)
+  onLoadMore = () => {},
+}) => {
+
+  // ============================================================
+  // ✅ FIX 1: refs — источник истины для защиты от гонок
+  // ============================================================
+  const isLoadingMoreRef = useRef(false);
+  const lastCallTimeRef = useRef(0);
+  const sentinelRef = useRef(null);
+
+  // Синхронизируем ref с пропсом (для UI-спиннера)
+  useEffect(() => {
+    isLoadingMoreRef.current = isLoadingMore;
+  }, [isLoadingMore]);
+
+  // ============================================================
+  // 1. Форматирование колонок (даты)
+  // ============================================================
+  const formattedColumns = useMemo(() => {
+    return columns.map(column => {
+      if (column.type === 'date') {
+        return {
+          ...column,
+          cell: column.cell
+            ? column.cell
+            : (props) => formatDate(props.getValue()),
+        };
+      }
+      return column;
+    });
+  }, [columns]);
+
+  // ============================================================
+  // 2. Состояния
+  // ============================================================
+  const [selectedRecord, setSelectedRecord] = useState(null);
+  const [rowSelection, setRowSelection] = useState({});
+  const [sorting, setSorting] = useState([]);
+  const [mode, setMode] = useState(null);
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [hasUserInteracted, setHasUserInteracted] = useState(false);
+  const [isFilterDialogOpen, setIsFilterDialogOpen] = useState(false);
+
+  const [filterParams, setFilterParams] = useState({
+    newident: initialNewIdent
+  });
+
+  const [isSimpleFilterActive, setIsSimpleFilterActive] = useState(false);
+  const { permissions, isDeveloper } = useUiPermission();
+
+  // ============================================================
+  // 3. Синхронизация initialNewIdent
+  // ============================================================
+  useEffect(() => {
+    setFilterParams(prev => ({ ...prev, newident: initialNewIdent }));
+  }, [initialNewIdent]);
+
+  // ============================================================
+  // 4. ✅ FIXED Intersection Observer
+  // ============================================================
+  useEffect(() => {
+    if (!infinite) return;
+
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const [entry] = entries;
+        if (!entry.isIntersecting) return;
+
+        // ✅ FIX: защита только через ref (state асинхронный)
+        if (!hasMore || isLoadingMoreRef.current) return;
+
+        // ✅ FIX: throttle 500ms — защита от дребезга observer
+        const now = Date.now();
+        if (now - lastCallTimeRef.current < 500) return;
+        lastCallTimeRef.current = now;
+
+        onLoadMore();
+      },
+      {
+        root: null,
+        rootMargin: '200px',
+        threshold: 0.1
+      }
+    );
+
+    observer.observe(sentinel);
+
+    return () => {
+      if (sentinel) observer.unobserve(sentinel);
+    };
+  }, [infinite, hasMore, onLoadMore]);
+
+  // ============================================================
+  // 5. Обработчики
+  // ============================================================
+  const handleRowClick = (row) => {
+    setSelectedRecord(row.original);
+    setHasUserInteracted(true);
+    if (onRowSelect) {
+      onRowSelect(row.original);
+    }
+  };
+
+  const handleAddClick = () => {
+    if (!initialNewIdent && record) {
+      setSelectedRecord(record);
+    } else {
+      setSelectedRecord({ initialNewIdent });
+    }
+    setMode("add");
+    setIsFormOpen(true);
+  };
+
+  const handleEditClick = (rec) => {
+    setSelectedRecord(rec);
+    setMode("edit");
+    setIsFormOpen(true);
+  };
+
+  const handleDeleteClick = (rec) => {
+    setSelectedRecord(rec);
+    setMode("delete");
+    setIsFormOpen(true);
+  };
+
+  const handleOpenFilterDialog = () => {
+    setIsFilterDialogOpen(true);
+  };
+
+  const handleApplyFilters = (filters, filterType) => {
+    const newFilterParams = { ...filters };
+    setFilterParams(newFilterParams);
+    setIsFilterDialogOpen(false);
+    setIsSimpleFilterActive(filterType === 'simple');
+
+    if (onApplyFilters) {
+      onApplyFilters(newFilterParams);
+    } else {
+      reloadData(newFilterParams);
+    }
+  };
+
+  const handleReload = () => {
+    if (isSimpleFilterActive) {
+      setFilterParams({});
+      setIsSimpleFilterActive(false);
+      reloadData();
+    } else {
+      reloadData(filterParams);
+    }
+  };
+
+  const handleSuccess = (rec, mode) => {
+    if (mode === "add") {
+      setData(prev => [...prev, rec]);
+      setSelectedRecord(rec);
+      setRowSelection({ [rec[pk]]: true });
+    } else if (mode === "edit") {
+      setData(prev => prev.map(item => item[pk] === rec[pk] ? rec : item));
+      setSelectedRecord(rec);
+      setRowSelection({ [rec[pk]]: true });
+    } else if (mode === "delete") {
+      setData(prev => prev.filter(item => item[pk] !== rec[pk]));
+      setSelectedRecord(null);
+      setRowSelection({});
+    }
+    setIsFormOpen(false);
+  };
+
+  const handleFormClose = () => {
+    setIsFormOpen(false);
+  };
+
+  // ============================================================
+  // 6. Колонки
+  // ============================================================
+  const tableColumns = useMemo(() => {
+    const final_col = [...formattedColumns];
+
+    const canEdit = hasPermission(permissions, pageName, 'edit_btn', isDeveloper);
+    const canDelete = hasPermission(permissions, pageName, 'delete_btn', isDeveloper);
+
+    if (visibleToolbarButtons.includes('Действия') && (canEdit || canDelete)) {
+      final_col.push({
+        id: "actions",
+        header: "Действия",
+        cell: ({ row }) => (
+          <div style={{ display: "flex", gap: "10px" }}>
+            {canEdit && (
+              <EditIcon
+                titleAccess="Редактирование"
+                sx={{ width: 20, cursor: "pointer" }}
+                onClick={() => handleEditClick(row.original)}
+              />
+            )}
+            {canDelete && (
+              <DeleteForeverIcon
+                titleAccess="Удаление"
+                sx={{ width: 20, cursor: "pointer" }}
+                onClick={() => handleDeleteClick(row.original)}
+              />
+            )}
+          </div>
+        )
+      });
+    }
+
+    return final_col;
+  }, [formattedColumns, permissions, pageName, isDeveloper, visibleToolbarButtons]);
+
+  // ============================================================
+  // 7. TanStack Table
+  // ============================================================
+  const table = useReactTable({
+    data,
+    columns: tableColumns,
+    state: { sorting, rowSelection },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
+  // ============================================================
+  // 8. Рендер
+  // ============================================================
+  return (
+    <div style={{ border: "1px solid #ccc" }}>
+      {/* Toolbar */}
+      <div
+        className='tools-panel'
+        style={{
+          margin: '4px',
+          display: "flex",
+          position: "sticky",
+          top: 0,
+          zIndex: 1,
+          background: "#fff"
+        }}
+      >
+        {visibleToolbarButtons.includes('add') && (
+          <CanAccess page={pageName} element="add_btn">
+            <AddCircleOutlineIcon
+              titleAccess="Добавить"
+              sx={{ width: 30, cursor: 'pointer' }}
+              onClick={handleAddClick}
+            />
+          </CanAccess>
+        )}
+
+        {visibleToolbarButtons.includes('filter') && (
+          <FilterListIcon
+            titleAccess="Фильтр"
+            sx={{ width: 30, cursor: 'pointer', marginLeft: "10px" }}
+            onClick={handleOpenFilterDialog}
+          />
+        )}
+
+        {visibleToolbarButtons.includes('refresh') && (
+          <RefreshIcon
+            titleAccess="Обновить"
+            style={{ width: 30, cursor: 'pointer', marginLeft: "10px" }}
+            onClick={handleReload}
+          />
+        )}
+
+        <Typography className='flex-1 text-center font-bold text-lg'>
+          {title}
+        </Typography>
+      </div>
+
+      {loading ? (
+        <Box sx={{ display: "flex", justifyContent: "center", p: 4 }}>
+          <CircularProgress />
+        </Box>
+      ) : (
+        <>
+          <table
+            border="1"
+            cellPadding="5"
+            style={{ width: '100%', borderCollapse: 'collapse' }}
+          >
+            <thead>
+              {table.getHeaderGroups().map((headerGroup) => (
+                <tr key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => (
+                    <th
+                      key={header.id}
+                      style={{
+                        position: "sticky",
+                        top: 0,
+                        zIndex: 1,
+                        background: "#f0f0f0",
+                        border: "1px solid #ccc",
+                        padding: "5px",
+                        cursor: 'pointer'
+                      }}
+                      onClick={header.column.getToggleSortingHandler()}
+                    >
+                      {header.isPlaceholder
+                        ? null
+                        : flexRender(header.column.columnDef.header, header.getContext())
+                      }
+                      {{ asc: '↑', desc: '↓' }[header.column.getIsSorted()] ?? null}
+                    </th>
+                  ))}
+                </tr>
+              ))}
+            </thead>
+
+            <tbody>
+              {table.getRowModel().rows.map((row) => (
+                <tr
+                  key={row.id}
+                  onClick={() => handleRowClick(row)}
+                  style={{
+                    cursor: 'pointer',
+                    backgroundColor:
+                      (hasUserInteracted
+                        ? selectedRecord
+                        : (activeRecord || selectedRecord)
+                      )?.[pk] === row.original[pk]
+                        ? "#e6f7ff"
+                        : "transparent",
+                  }}
+                >
+                  {row.getVisibleCells().map((cell) => (
+                    <td
+                      key={cell.id}
+                      className="border-b border-r border-gray-150 border-1 text-left py-1"
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* Infinite scroll sentinel */}
+          {infinite && (
+            <div style={{ padding: '12px 0', textAlign: 'center' }}>
+              <div ref={sentinelRef} style={{ height: '1px', width: '100%' }} />
+
+              {isLoadingMore && (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 1 }}>
+                  <CircularProgress size={24} />
+                </Box>
+              )}
+
+              {!hasMore && data.length > 0 && (
+                <Typography variant="body2" color="text.secondary">
+                  Все записи загружены
+                </Typography>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Диалог фильтрации */}
+      {FilterComponent ? (
+        <FilterComponent
+          open={isFilterDialogOpen}
+          onClose={() => setIsFilterDialogOpen(false)}
+          onApply={handleApplyFilters}
+          {...filterConfig}
+          initialFilters={filterParams}
+        />
+      ) : (
+        <FilterDialog
+          open={isFilterDialogOpen}
+          onClose={() => setIsFilterDialogOpen(false)}
+          onApply={handleApplyFilters}
+          izdatOptions={[]}
+          initialFilters={filterParams}
+        />
+      )}
+
+      {/* CRUD-форма */}
+      {isFormOpen && FormComponent && (
+        <FormComponent
+          record={selectedRecord}
+          mode={mode}
+          onClose={handleFormClose}
+          onSuccess={handleSuccess}
+          open={isFormOpen}
+        />
+      )}
+    </div>
+  );
+};
+
+export default FlatTableInfinity;
+
+
+
+// ============================================================================================
+//                        2. CatalogeSborn.jsx (полный текст с фиксами)
+// ============================================================================================
+
+
+import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import HierarchicalTable from "../components/UI/table/HierarchicalTable";
+import EditDeleteFormSborn from "./EditDeleteFormSborn";
+import { api } from "../config/api";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { Button, TextField } from "@mui/material";
+import "tailwindcss";
+import SbornStruArchiv from "./SbornStruArchiv";
+import Vzamen from "./Vzamen";
+import FlatTableInfinity from "../components/UI/table/FlatTableInfinity";
+
+// =====================================================================
+// Компонент каталога сборников
+// =====================================================================
+export default function CatalogeSborn() {
+
+  // -----------------------------------------------------------------
+  // STATE
+  // -----------------------------------------------------------------
+  const [dataCat, setDataCat] = useState([]);
+  const [activeHierId, setActiveHierId] = useState(null);
+
+  const [filterIndex, setFilterIndex] = useState();
+  const [filterParams, setFilterParams] = useState({});
+  const [myFilterParams, setMyFilterParams] = useState([
+    { id: "newident", value: filterIndex || filterParams.newident || '1' }
+  ]);
+
+  const [loading, setLoading] = useState(true);
+  const [loadingSborn, setLoadingSborn] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+  const [filteredSbornData, setFilteredSbornData] = useState([]);
+  const [rowSborn, setRowSborn] = useState();
+
+  const [pageIndex, setPageIndex] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const pageSize = 17;
+
+  const hasMore = filteredSbornData.length < totalCount;
+
+  // ✅ FIX: ref — единственный источник истины для блокировки подгрузки
+  const isLoadingMoreRef = useRef(false);
+
+  const [isSbornStruDialogOpen, setIsSbornStruDialogOpen] = useState(false);
+  const [isVzamenDialogOpen, setIsVzamenDialogOpen] = useState(false);
+
+  // -----------------------------------------------------------------
+  // Утилита даты
+  // -----------------------------------------------------------------
+  const formatDate = (isoString) => {
+    if (!isoString) return "";
+    const date = new Date(isoString);
+    return date.toLocaleDateString("ru-RU");
+  };
+
+  // -----------------------------------------------------------------
+  // Загрузка дерева каталога
+  // -----------------------------------------------------------------
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        const hierResponse = await api.get('api/catalog/tree/');
+        setDataCat(hierResponse.data);
+      } catch (error) {
+        console.error("Ошибка загрузки данных", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
+  }, []);
+
+  // -----------------------------------------------------------------
+  // Главная функция загрузки сборников
+  // -----------------------------------------------------------------
+  const loadSbornData = useCallback(
+    async (params = {}, pageOverride = null, append = false) => {
+      // ✅ FIX: защита от повторных запросов при append
+      if (append && isLoadingMoreRef.current) return;
+
+      try {
+        if (append) {
+          isLoadingMoreRef.current = true;
+          setIsLoadingMore(true);
+        } else {
+          setLoadingSborn(true);
+        }
+
+        // ✅ FIX: берём страницу строго из аргумента, а не из возможно устаревшего state
+        const page = pageOverride ?? 1;
+
+        const allParams = {
+          ...filterParams,
+          ...params,
+          newident: filterIndex ?? params.newident ?? filterParams.newident ?? '',
+          paginate: true,
+          page,
+          page_size: pageSize,
+        };
+
+        // Новые фильтры → всегда с 1 страницы
+        if (Object.keys(params).length > 0 && !append) {
+          allParams.page = 1;
+        }
+
+        const queryParams = new URLSearchParams();
+        Object.keys(allParams).forEach(key => {
+          if (allParams[key] !== undefined && allParams[key] !== '' && allParams[key] !== null) {
+            queryParams.append(key, allParams[key]);
+          }
+        });
+
+        const response = await api.get(`api/sborn/?${queryParams.toString()}`);
+        const data = response.data.results || response.data || [];
+
+        setTotalCount(response.data.count || 0);
+
+        // ✅ FIX: корректное обновление данных
+        setFilteredSbornData(prev =>
+          append ? [...prev, ...data] : data
+        );
+
+        // ✅ FIX: pageIndex обновляем только из запрошенной страницы
+        setPageIndex(page);
+
+        return response;
+      } catch (error) {
+        console.error("Ошибка загрузки данных сборников:", error);
+        throw error;
+      } finally {
+        if (append) {
+          isLoadingMoreRef.current = false;
+          setIsLoadingMore(false);
+        } else {
+          setLoadingSborn(false);
+        }
+      }
+    },
+    [filterParams, filterIndex, pageSize]
+  );
+
+  // -----------------------------------------------------------------
+  // Клик по дереву
+  // -----------------------------------------------------------------
+  const handleHierRowSelect = (row) => {
+    const newFilterIndex = row.index;
+    setActiveHierId(row.id);
+    setFilterIndex(newFilterIndex);
+    setFilterParams({ newident: newFilterIndex });
+
+    setMyFilterParams((prev) => {
+      const hasNewident = prev.some(column => column.id === "newident");
+      if (hasNewident) {
+        return prev.map(column =>
+          column?.id === "newident"
+            ? { ...column, value: newFilterIndex }
+            : column
+        );
+      }
+      return [...prev, { id: "newident", value: newFilterIndex }];
+    });
+
+    // ✅ FIX: сброс данных + загрузка первой страницы
+    setFilteredSbornData([]);
+    setPageIndex(1);
+    loadSbornData({ newident: newFilterIndex }, 1, false);
+  };
+
+  // -----------------------------------------------------------------
+  // Применение фильтров
+  // -----------------------------------------------------------------
+  const handleApplyFilters = (newFilters) => {
+    setFilterParams(newFilters);
+
+    // ✅ FIX: сброс данных перед загрузкой
+    setFilteredSbornData([]);
+    setPageIndex(1);
+
+    loadSbornData(newFilters, 1, false);
+  };
+
+  // -----------------------------------------------------------------
+  // Подгрузка следующей страницы
+  // -----------------------------------------------------------------
+  const handleLoadMore = useCallback(() => {
+    // ✅ FIX: железная защита через ref
+    if (!hasMore || isLoadingMoreRef.current || loadingSborn) return;
+
+    const nextPage = pageIndex + 1;
+    loadSbornData({}, nextPage, true);
+  }, [hasMore, loadingSborn, pageIndex, loadSbornData]);
+
+  // -----------------------------------------------------------------
+  // Колонки
+  // -----------------------------------------------------------------
+  const colCat = useMemo(() => [
+    { header: '', accessorKey: 'level_name', cell: (info) => info.getValue() },
+    { header: 'Наименование', accessorKey: 'element_name', cell: (info) => info.getValue() },
+  ], []);
+
+  const colSb = useMemo(() => [
+    { accessorKey: 'sborn_id', header: 'Код сбора', cell: (info) => info.getValue(), enableColumnFilter: true },
+    { accessorKey: 'newident', header: 'Индекс', cell: (info) => info.getValue(), enableColumnFilter: true },
+    { accessorKey: 'ident', header: 'Пред. индекс', cell: (info) => info.getValue(), enableColumnFilter: true },
+    { accessorKey: 'name', header: 'Наименование', cell: (info) => info.getValue(), enableColumnFilter: true },
+  ], []);
+
+  // -----------------------------------------------------------------
+  // Выбор сборника
+  // -----------------------------------------------------------------
+  const handleSelectSborn = (row) => {
+    setRowSborn(row);
+  };
+
+  // -----------------------------------------------------------------
+  // Рендер
+  // -----------------------------------------------------------------
+  if (loading && dataCat.length === 0) {
+    return (
+      <div style={{
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        height: "50vh"
+      }}>
+        <p>Загрузка данных каталога...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-screen w-full p-2 overflow-hidden bg-white">
+      <h3 className="text-[13px] font-semibold text-center mb-1.5 uppercase tracking-wide">
+        Каталог сборников
+      </h3>
+
+      <PanelGroup
+        id="catsborn_horiz1_layout"
+        direction="horizontal"
+        autoSaveId="catsborn-horiz1-layout"
+        className="flex-grow border border-gray-200 rounded-lg overflow-hidden"
+      >
+        {/* Левая панель — дерево */}
+        <Panel id="catsborn-left-panel" defaultSize={50} minSize={15}>
+          <div className="h-full w-full p-1 overflow-auto">
+            <HierarchicalTable
+              data={dataCat}
+              columns={colCat}
+              onRowSelect={handleHierRowSelect}
+              expandName="level_name"
+              onSelect={setActiveHierId}
+              activeId={activeHierId}
+            />
+          </div>
+        </Panel>
+
+        <PanelResizeHandle className="w-[5px] bg-gray-300 hover:bg-blue-400 transition-colors cursor-col-resize" />
+
+        {/* Правая панель */}
+        <Panel id="catsborn-right-panel" defaultSize={50} minSize={15}>
+          <PanelGroup id="catsborn_vert1_layout" direction="vertical" autoSaveId="catsborn-vert1-layout">
+
+            {/* Верхняя правая — таблица */}
+            <Panel id="catsborn-top-layout" defaultSize={50} minSize={20}>
+              <div className="h-full w-full p-2 flex flex-col justify-between overflow-hidden">
+                <div className="flex-grow overflow-auto">
+                  <FlatTableInfinity
+                    pageName="catalogsborn"
+                    data={filteredSbornData}
+                    columns={colSb}
+                    pk="sborn_id"
+                    setData={setFilteredSbornData}
+                    reloadData={loadSbornData}
+                    FormComponent={EditDeleteFormSborn}
+                    initialNewIdent={filterIndex}
+                    onApplyFilters={handleApplyFilters}
+                    loading={loadingSborn}
+                    onRowSelect={handleSelectSborn}
+
+                    infinite={true}
+                    hasMore={hasMore}
+                    isLoadingMore={isLoadingMore}
+                    onLoadMore={handleLoadMore}
+                  />
+                </div>
+              </div>
+            </Panel>
+
+            <PanelResizeHandle className="h-[5px] bg-gray-200 hover:bg-blue-400 transition-colors cursor-row-resize" />
+
+            {/* Нижняя правая — детализация */}
+            <Panel id="catsborn-top2-layout" defaultSize={50} minSize={20}>
+              <div className="h-full w-full m-34">
+                <PanelGroup id="sub-horizontal-group" direction="horizontal" autoSaveId="catsborn_-horiz2-layout">
+
+                  {/* Левая сторона детализации */}
+                  <Panel id="left-form-panel" defaultSize={60} minSize={30}>
+                    <div className="h-full w-full flex flex-col items-stretch justify-start bg-white shadow-md px-5 pt-4 pb-6 gap-4 overflow-auto rounded-l-lg">
+
+                      <TextField
+                        fullWidth
+                        margin="normal"
+                        size="small"
+                        label="Полное наименование"
+                        name="fname"
+                        value={rowSborn?.fname || ""}
+                        multiline
+                        maxRows={3}
+                      />
+
+                      {/* БЛОК 1: Архив и Коэффициент */}
+                      <div className="flex flex-col items-start justify-start gap-4 w-full my-2">
+                        <div className="flex flex-row items-end justify-start gap-[30px] flex-wrap w-full">
+                          <div>
+                            <TextField
+                              label="Архив"
+                              name="arhiv"
+                              size="small"
+                              variant="standard"
+                              value={
+                                rowSborn?.arhiv === 0 ? "Действующий" :
+                                rowSborn?.arhiv === 1 ? "В архиве" : ""
+                              }
+                            />
+                          </div>
+                          <div>
+                            <Button
+                              variant="contained"
+                              className="!normal-case !bg-[rgba(240,240,240,0.8)] hover:!bg-[rgba(240,240,240,1)] !text-black"
+                              onClick={() => setIsSbornStruDialogOpen(true)}
+                              sx={{
+                                ...(!rowSborn?.sborn_id && {
+                                  pointerEvents: 'none',
+                                  opacity: 0.5,
+                                })
+                              }}
+                            >
+                              Посмотреть структуры в архиве
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-row items-end justify-start gap-[30px] flex-wrap w-full">
+                          <div>
+                            <TextField
+                              label="Поправочный коэффициент"
+                              name="koef"
+                              size="small"
+                              variant="standard"
+                              value={rowSborn?.koef || ''}
+                            />
+                          </div>
+                          <div>
+                            <Button
+                              variant="contained"
+                              className="!normal-case !bg-[rgba(240,240,240,0.8)] hover:!bg-[rgba(240,240,240,1)] !text-black"
+                              onClick={() => {
+                                if (!rowSborn?.sborn_id) return;
+                                setIsVzamenDialogOpen(true);
+                              }}
+                              sx={{
+                                ...(!rowSborn?.sborn_id && {
+                                  pointerEvents: 'none',
+                                  opacity: 0.5,
+                                })
+                              }}
+                            >
+                              Введен взамен
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* БЛОК 2: Даты и Документы */}
+                      <div className="flex flex-row items-end justify-start gap-2 flex-wrap w-full">
+                        <div className="flex flex-row items-end justify-start gap-[30px] flex-wrap w-full">
+                          <div>
+                            <TextField
+                              label="Дата ввода"
+                              name="srok1"
+                              size="small"
+                              variant="standard"
+                              value={formatDate(rowSborn?.srok1) || ''}
+                            />
+                          </div>
+                          <div className="flex-grow">
+                            <TextField
+                              label="Утверждающий документ"
+                              name="utv_data"
+                              size="small"
+                              variant="standard"
+                              value={rowSborn?.utv_doc || ''}
+                              fullWidth
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-row items-end justify-start gap-[30px] flex-wrap w-full">
+                        <div>
+                          <TextField
+                            label="Дата ограничения"
+                            name="srok2"
+                            size="small"
+                            variant="standard"
+                            value={formatDate(rowSborn?.srok2) || ''}
+                          />
+                        </div>
+                        <div className="flex-grow">
+                          <TextField
+                            label="Ограничивающий документ"
+                            name="ogr_data"
+                            size="small"
+                            variant="standard"
+                            value={rowSborn?.ogr_doc || ''}
+                            fullWidth
+                          />
+                        </div>
+                      </div>
+
+                      {rowSborn?.prim && (
+                        <TextField
+                          fullWidth
+                          margin="normal"
+                          size="small"
+                          label="Примечания"
+                          name="prim"
+                          value={rowSborn?.prim || ""}
+                          multiline
+                          maxRows={3}
+                        />
+                      )}
+
+                      {rowSborn?.annotat && (
+                        <TextField
+                          fullWidth
+                          margin="normal"
+                          size="small"
+                          label="Аннотация"
+                          name="annotat"
+                          value={rowSborn?.annotat || ""}
+                          multiline
+                          maxRows={3}
+                        />
+                      )}
+
+                      {rowSborn?.dop_prim && (
+                        <TextField
+                          fullWidth
+                          margin="normal"
+                          size="small"
+                          label="Доп.примечания"
+                          name="dop_prim"
+                          value={rowSborn?.dop_prim || ""}
+                          multiline
+                          maxRows={3}
+                        />
+                      )}
+                    </div>
+                  </Panel>
+
+                  <PanelResizeHandle className="w-1.5 bg-gray-200 hover:bg-blue-500 active:bg-blue-600 transition-colors cursor-ew-resize" />
+
+                  {/* Правая сторона — Предприятия */}
+                  <Panel id="catsborn-right-layout" defaultSize={40} minSize={20}>
+                    <div className="h-full w-full bg-white shadow-md flex flex-col rounded-r-lg overflow-hidden">
+                      <br />
+                      <TextField
+                        fullWidth
+                        name="right_text_field"
+                        multiline
+                        value={
+                          rowSborn?.enterps_detail && rowSborn.enterps_detail.length > 0
+                            ? rowSborn.enterps_detail.map(item => ' - ' + item.name).join('\n')
+                            : ""
+                        }
+                        variant="standard"
+                        inputProps={{ spellCheck: false }}
+                        sx={{
+                          height: '100%',
+                          '& .MuiInputBase-root': {
+                            height: '100%',
+                            alignItems: 'flex-start',
+                            padding: '16px',
+                            '&:before, &:after': {
+                              display: 'none',
+                            }
+                          },
+                          '& .MuiInputBase-input': {
+                            height: '100% !important',
+                            overflowY: 'auto !important',
+                            whiteSpace: 'pre-wrap !important',
+                          }
+                        }}
+                        placeholder="Предприятия:"
+                      />
+                    </div>
+                  </Panel>
+                </PanelGroup>
+              </div>
+            </Panel>
+          </PanelGroup>
+        </Panel>
+      </PanelGroup>
+
+      {/* Диалоги */}
+      <SbornStruArchiv
+        open={isSbornStruDialogOpen}
+        onClose={() => setIsSbornStruDialogOpen(false)}
+        sborn={rowSborn}
+      />
+      <Vzamen
+        open={isVzamenDialogOpen}
+        onClose={() => setIsVzamenDialogOpen(false)}
+        sborn={rowSborn}
+      />
+    </div>
+  );
+}
