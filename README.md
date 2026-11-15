@@ -266,7 +266,7 @@ public class CalcCrudController {
         return ResponseEntity.noContent().build();
     }
 }
-------------------
+------------ bush ------
 curl -X PUT "http://localhost:8090/api/calc-crud/1?username=твой_логин" \
      -H "Content-Type: application/json" \
      -d '{
@@ -275,4 +275,27 @@ curl -X PUT "http://localhost:8090/api/calc-crud/1?username=твой_логин"
            "numDraft": "999",
            "numTp": "111"
          }'
-
+         
+------------ console -----
+javascript
+fetch('http://localhost:8090/api/calc-crud/1?username=твой_логин', {
+    method: 'PUT',
+    headers: {
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+        "name": "Крышка (обновленная)",
+        "dateInput": "2026-11-15",
+        "numDraft": "123-456",
+        "numTp": "777",
+        "enterpId": 1,
+        "vidZagot": 2,
+        "materU": 3
+    })
+})
+.then(response => {
+    if (response.ok) console.log("✅ УСПЕХ! Данные обновлены.");
+    else console.log("❌ ОШИБКА! Статус: " + response.status);
+})
+.catch(error => console.error("❌ Ошибка сети:", error));
+------------ 
