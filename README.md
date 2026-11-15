@@ -106,7 +106,7 @@ public class CalcListController {
 
     private final CalcListService calcListService;
 
-    // Вызов: GET /api/calc-list?username=USERNAME_FIO&name=Крышка
+    // Вызов: GET /api/calc-list?username=your_login&name=Крышка
     @GetMapping
     public List<CalcListDto> getList(@RequestParam Map<String, String> filters) {
         return calcListService.getCalcList(filters);
