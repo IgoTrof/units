@@ -1,3 +1,4 @@
+1
 -------------- CalcListService ------------
 package mashstroi.service;
 
@@ -112,4 +113,166 @@ public class CalcListController {
         return calcListService.getCalcList(filters);
     }
 }
+
+
+2 CRUD
+---------------------------- CalcCrudDto.java в пакете dto -----------
+package mashstroi.dto;
+
+import lombok.Data;
+import java.math.BigDecimal;
+import java.time.LocalDate;
+
+@Data
+public class CalcCrudDto {
+    private BigDecimal calcId;       // PK. При создании может быть null, база/последовательность выдаст сама
+    private String name;             // Наименование изделия
+    private LocalDate dateInput;     // Дата составления
+    private String numDraft;         // Номер чертежа
+    private String numTp;            // Номер техпроцесса
+    private BigDecimal enterpId;     // ID подразделения
+    private BigDecimal vidZagot;     // Справочник: вид заготовки
+    private BigDecimal materU;       // Справочник: материал
+    private BigDecimal userCount;    // Тот самый user_id или user_count из базы
+    
+    // ... добавь остальные поля из своей таблицы, если нужно
+}
+-------------------------- CalcCrudService.java -----------------
+package mashstroi.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import mashstroi.dto.CalcCrudDto;
+import org.springframework.jdbc.core.BeanPropertyRowMapper;
+import org.springframework.jdbc.core.namedparam.BeanPropertySqlParameterSource;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.util.List;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class CalcCrudService {
+
+    private final NamedParameterJdbcTemplate namedJdbcTemplate;
+
+    // 1. ПОЛУЧИТЬ ОДНУ ЗАПИСЬ ПО ID (Read)
+    @Transactional
+    public CalcCrudDto getById(BigDecimal calcId) {
+        String sql = "SELECT * FROM mech.calc WHERE calc_id = :id";
+        
+        // MapSqlParameterSource - это просто способ передать параметры (как Map)
+        MapSqlParameterSource params = new MapSqlParameterSource("id", calcId);
+        
+        List<CalcCrudDto> list = namedJdbcTemplate.query(sql, params, 
+                new BeanPropertyRowMapper<>(CalcCrudDto.class));
+                
+        return list.isEmpty() ? null : list.get(0);
+    }
+
+    // 2. СОЗДАТЬ (Create)
+    @Transactional
+    public void create(CalcCrudDto dto) {
+        // ВАЖНО: В легаси-базах ID часто генерируется через sequence. 
+        // Если у тебя sequence называется иначе, поменяй 'mech.calc_seq'
+        // Если ID приходит с фронта, просто используй :calcId в INSERT
+        String sql = "INSERT INTO mech.calc " +
+                "(calc_id, name, date_input, num_draft, num_tp, enterp_id, vid_zagot, mater_u) " +
+                "VALUES (nextval('mech.calc_seq'), :name, :dateInput, :numDraft, :numTp, :enterpId, :vidZagot, :materU)";
+
+        // BeanPropertySqlParameterSource берет все поля из DTO и подставляет их в :name, :dateInput и т.д.
+        namedJdbcTemplate.update(sql, new BeanPropertySqlParameterSource(dto));
+        log.info("Создан новый расчет: {}", dto.getName());
+    }
+
+    // 3. ОБНОВИТЬ (Update)
+    @Transactional
+    public void update(CalcCrudDto dto) {
+        String sql = "UPDATE mech.calc SET " +
+                "name = :name, " +
+                "date_input = :dateInput, " +
+                "num_draft = :numDraft, " +
+                "num_tp = :numTp, " +
+                "enterp_id = :enterpId, " +
+                "vid_zagot = :vidZagot, " +
+                "mater_u = :materU " +
+                "WHERE calc_id = :calcId";
+
+        namedJdbcTemplate.update(sql, new BeanPropertySqlParameterSource(dto));
+        log.info("Обновлен расчет с ID: {}", dto.getCalcId());
+    }
+
+    // 4. УДАЛИТЬ (Delete)
+    @Transactional
+    public void delete(BigDecimal calcId) {
+        String sql = "DELETE FROM mech.calc WHERE calc_id = :id";
+        MapSqlParameterSource params = new MapSqlParameterSource("id", calcId);
+        namedJdbcTemplate.update(sql, params);
+        log.info("Удален расчет с ID: {}", calcId);
+    }
+}
+--------------- CalcCrudController.java --
+package mashstroi.controller;
+
+import lombok.RequiredArgsConstructor;
+import mashstroi.dto.CalcCrudDto;
+import mashstroi.service.CalcCrudService;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.math.BigDecimal;
+
+@RestController
+@RequestMapping("/api/calc-crud")
+@RequiredArgsConstructor
+public class CalcCrudController {
+
+    private final CalcCrudService calcCrudService;
+
+    // GET: Получить расчет для редактирования
+    @GetMapping("/{id}")
+    public ResponseEntity<CalcCrudDto> getById(@PathVariable BigDecimal id) {
+        CalcCrudDto dto = calcCrudService.getById(id);
+        if (dto == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(dto);
+    }
+
+    // POST: Создать новый расчет
+    @PostMapping
+    public ResponseEntity<Void> create(@RequestBody CalcCrudDto dto) {
+        calcCrudService.create(dto);
+        return ResponseEntity.status(HttpStatus.CREATED).build();
+    }
+
+    // PUT: Обновить расчет
+    @PutMapping("/{id}")
+    public ResponseEntity<Void> update(@PathVariable BigDecimal id, @RequestBody CalcCrudDto dto) {
+        dto.setCalcId(id); // Гарантируем, что обновляем тот ID, который в URL
+        calcCrudService.update(dto);
+        return ResponseEntity.ok().build();
+    }
+
+    // DELETE: Удалить расчет
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> delete(@PathVariable BigDecimal id) {
+        calcCrudService.delete(id);
+        return ResponseEntity.noContent().build();
+    }
+}
+------------------
+curl -X PUT "http://localhost:8090/api/calc-crud/1?username=твой_логин" \
+     -H "Content-Type: application/json" \
+     -d '{
+           "name": "Крышка через Bash",
+           "dateInput": "2026-11-15",
+           "numDraft": "999",
+           "numTp": "111"
+         }'
 
