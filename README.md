@@ -1,10 +1,4 @@
-1
--------------- CalcListService ------------
-package mashstroi.service;
 
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import mashstroi.dto.CalcListDto;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
@@ -71,14 +65,7 @@ public class CalcListService {
         }
         
         if (filters.containsKey("nameEnterp") && filters.get("nameEnterp") != null && !filters.get("nameEnterp").isBlank()) {
-            sql.append(" AND te.NAME ILIKE ? ");
-            params.add("%" + filters.get("nameEnterp") + "%");
-        }
-
-        // 2. Сортировка (по умолчанию по ID)
-        sql.append(" ORDER BY c.CALC_ID DESC ");
-
-        log.info("Выполнение запроса списка расчетов. SQL: {}", sql.toString());
+            
         
         // Выполняем запрос с параметрами (защита от SQL-инъекций)
         return jdbcTemplate.query(sql.toString(), rowMapper, params.toArray());
